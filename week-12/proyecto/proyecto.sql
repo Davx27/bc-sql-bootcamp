@@ -1,9 +1,9 @@
--- Proyecto Semanal: Subqueries en tu dominio
--- Semana 11
+-- Proyecto Semanal: CTEs y CASE WHEN en tu dominio
+-- Semana 12
 -- Aprendiz: David Alejandro Mendieta Aponte
 -- Dominio: Distribuidora de alimentos
 
-PRAGMA foreign_keys = ON;
+pragma foreign_keys = on;
 
 drop table if exists deliveries;
 drop table if exists products;
@@ -20,10 +20,10 @@ create table deliveries (
     id integer primary key autoincrement,
     product_id integer not null references products (id),
     quantity integer not null default 1,
-    status text not null default 'Entregado'
+    tx_date text not null -- formato YYYY-MM-DD
 );
 
--- 2. Inserción masiva de productos (80 filas mínimas exigidas)
+-- 2. Inserción masiva de productos (80 filas mínimas exigidas con variación de precios para las bandas)
 insert into products (name, category, price) values
 ('Leche Entera 1L', 'Lácteos', 4200), ('Queso Doble Crema', 'Lácteos', 12000), ('Yogurt Fresa', 'Lácteos', 3500), 
 ('Mantequilla 250g', 'Lácteos', 5000), ('Crema de Leche', 'Lácteos', 4500), ('Queso Campesino', 'Lácteos', 6500),
@@ -57,71 +57,96 @@ insert into products (name, category, price) values
 ('Pan Tajado Molde', 'Panadería', 5500), ('Pan Hamburguesa x4', 'Panadería', 3800), ('Ponqué Casero', 'Panadería', 2500), 
 ('Bizcochos de Achira', 'Panadería', 3500);
 
--- 3. Inserción de entregas (20+ filas). Varios productos no tienen entregas para probar NOT EXISTS.
-insert into deliveries (product_id, quantity, status) values
-(1, 10, 'Entregado'), (2, 5, 'Entregado'), (3, 12, 'Pendiente'), (4, 8, 'Entregado'), (5, 15, 'Entregado'),
-(11, 20, 'Entregado'), (12, 10, 'Entregado'), (13, 25, 'Entregado'), (14, 6, 'Pendiente'), (15, 18, 'Entregado'),
-(31, 30, 'Entregado'), (32, 14, 'Entregado'), (35, 5, 'Cancelado'),
-(43, 24, 'Entregado'), (44, 50, 'Entregado'), (45, 12, 'Entregado'),
-(51, 8, 'Pendiente'), (52, 15, 'Entregado'), (53, 40, 'Entregado'), (54, 10, 'Entregado'),
-(63, 6, 'Entregado'), (64, 4, 'Cancelado'), (71, 10, 'Entregado');
+-- 3. Inserción de entregas distribuidas en diferentes fechas
+insert into deliveries (product_id, quantity, tx_date) values
+(1, 10, '2026-07-01'), (2, 5, '2026-07-02'), (3, 12, '2026-07-02'), 
+(4, 8, '2026-07-03'), (5, 15, '2026-07-04'), (11, 20, '2026-07-04'), 
+(12, 10, '2026-07-05'), (13, 25, '2026-07-06'), (14, 6, '2026-07-06'), 
+(15, 18, '2026-07-07'), (31, 30, '2026-07-07'), (32, 14, '2026-07-08'), 
+(35, 5, '2026-07-08'), (43, 24, '2026-07-09'), (44, 50, '2026-07-09');
 
 
--- 4. Requerimientos
+-- ============================================
+-- CONSULTA 1: CTE simple + CASE WHEN de clasificación
+-- CTE: Agrupa los productos y cuenta cuántos despachos han tenido.
+-- Principal: Clasifica los productos por su precio unitario en tres bandas.
+-- ============================================
 
--- CONSULTA 1: Subquery escalar en WHERE
--- La subconsulta calcula dinámicamente el precio promedio por categoría.
--- Luego, la consulta principal filtra los productos que superan el promedio de su propia categoría.
-select 
-    p.name,
-    p.price,
-    p.category
-from products p
-where p.price > (
-    select avg(p2.price)
-    from products p2
-    where p2.category = p.category
+with items_con_actividad as (
+     select
+         p.id,
+         p.name,
+         p.price,
+         p.category,
+         count(d.id) as total_transactions
+     from products p
+     left join deliveries d on d.product_id = p.id
+     group by p.id, p.name, p.price, p.category
 )
-order by p.category, p.price desc;
-
-
--- CONSULTA 2: Subquery escalar en SELECT
--- La subconsulta retorna un único valor (el promedio de precio de todo el inventario).
--- Este valor se agrega como una columna calculada adicional en cada fila de resultados.
-select 
-    name,
-    price,
-    round((select avg(price) from products), 2) as overall_avg
-from products
+select
+     name,
+     price,
+     total_transactions,
+     case
+         when price >= 8000 then 'Premium'
+         when price >= 4000 then 'Estándar'
+         else                    'Económico'
+     end as price_band
+from items_con_actividad
 order by price desc;
 
 
--- CONSULTA 3: NOT EXISTS — items sin actividad
--- La subconsulta correlacionada busca si existe algún registro de entrega para el producto actual.
--- NOT EXISTS invierte la lógica para devolver únicamente los productos que nunca han sido entregados/vendidos.
-select 
-    p.name as producto_sin_movimiento
-from products p
-where not exists (
-    select 1
-    from deliveries d
-    where d.product_id = p.id
-);
+-- ============================================
+-- CONSULTA 2: Dos CTEs encadenados
+-- Primer CTE: Agrega la cantidad total de artículos despachados por categoría.
+-- Segundo CTE: Filtra las categorías que superan el promedio general de despachos.
+-- Principal: Muestra los resultados finales apoyándose en el filtro del segundo CTE.
+-- ============================================
+
+with ventas_por_categoria as (
+     select
+         p.category,
+         sum(d.quantity) as total_vendido
+     from products p
+     inner join deliveries d on d.product_id = p.id
+     group by p.category
+),
+categorias_top as (
+     select category
+     from ventas_por_categoria
+     where total_vendido > (select avg(total_vendido) from ventas_por_categoria)
+)
+select
+     vc.category,
+     vc.total_vendido
+from ventas_por_categoria vc
+where vc.category in (select category from categorias_top)
+order by vc.total_vendido desc;
 
 
--- CONSULTA 4: Tabla derivada en FROM
--- La subconsulta genera una tabla temporal en memoria agrupando el total de cantidades entregadas por categoría.
--- La consulta principal lee esa tabla derivada (usando el alias cat_stats) y filtra las categorías con volumen mayor a 20.
-select 
-    cat_stats.category,
-    cat_stats.total_volumen
-from (
-    select 
-        p.category,
-        sum(d.quantity) as total_volumen
-    from products p
-    inner join deliveries d on d.product_id = p.id
-    group by p.category
-) as cat_stats
-where cat_stats.total_volumen > 20
-order by cat_stats.total_volumen desc;
+-- ============================================
+-- CONSULTA 3: CTE + COUNT condicional por banda
+-- CTE: Asigna a cada producto su respectiva banda salarial (clasificación).
+-- Principal: Genera un conteo pivotado por categoría y banda utilizando agregación condicional.
+-- ============================================
+
+with clasificados as (
+     select
+         name,
+         category,
+         price,
+         case
+             when price >= 8000 then 'Premium'
+             when price >= 4000 then 'Estándar'
+             else                    'Económico'
+         end as price_band
+     from products
+)
+select
+     category,
+     count(case when price_band = 'Premium'   then 1 end) as premium_count,
+     count(case when price_band = 'Estándar'  then 1 end) as estandar_count,
+     count(case when price_band = 'Económico' then 1 end) as economico_count
+from clasificados
+group by category
+order by category;
